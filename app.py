@@ -39,11 +39,11 @@ def buscar_cep(cep):
 @st.cache_data(show_spinner=False)
 def geolocalizar_endereco(logradouro, localidade, uf):
     """Obtém Lat/Lng do endereço via Nominatim (OpenStreetMap)."""
-    headers = {'User-Agent': 'KIVOO_Prospecta_Solar_App/2.0'}
+    headers = {'User-Agent': 'KIVOO_Prospecta_Solar_App/3.0'}
     query = f"{logradouro}, {localidade} - {uf}, Brasil"
     url = f"https://nominatim.openstreetmap.org/search?format=json&q={query}"
     try:
-        res = requests.get(url, headers=headers, timeout=5).json()
+        res = requests.get(url, headers=headers, timeout=8).json()
         if res:
             return float(res[0]['lat']), float(res[0]['lon'])
     except Exception:
@@ -52,49 +52,64 @@ def geolocalizar_endereco(logradouro, localidade, uf):
 
 @st.cache_data(show_spinner=False)
 def buscar_empresas_no_raio(lat, lon, raio_km):
-    """Busca comércios, indústrias e galpões no raio usando a Overpass API."""
+    """Busca comércios, indústrias, escritórios e galpões com servidor redundante."""
     raio_metros = raio_km * 1000
-    overpass_url = "http://overpass-api.de/api/interpreter"
+    
+    # Query de alto rendimento cobrindo padrões brasileiros de mapeamento
     overpass_query = f"""
-    [out:json];
+    [out:json][timeout:25];
     (
-      node["building"="commercial"](around:{raio_metros},{lat},{lon});
-      node["building"="industrial"](around:{raio_metros},{lat},{lon});
-      node["shop"](around:{raio_metros},{lat},{lon});
-      way["building"="commercial"](around:{raio_metros},{lat},{lon});
-      way["building"="industrial"](around:{raio_metros},{lat},{lon});
-      way["shop"](around:{raio_metros},{lat},{lon});
+      nwr["shop"](around:{raio_metros},{lat},{lon});
+      nwr["office"](around:{raio_metros},{lat},{lon});
+      nwr["industrial"](around:{raio_metros},{lat},{lon});
+      nwr["building"~"commercial|industrial|warehouse|roof"](around:{raio_metros},{lat},{lon});
+      nwr["amenity"~"fuel|bank|hospital|clinic|car_wash"](around:{raio_metros},{lat},{lon});
     );
-    out center;
+    out center 250;
     """
-    try:
-        response = requests.post(overpass_url, data={'data': overpass_query}, timeout=15)
-        data = response.json()
-        empresas = []
-        for element in data.get('elements', []):
-            tags = element.get('tags', {})
-            nome = tags.get('name', tags.get('operator', 'Empresa / Galpão Comercial'))
-            tipo = tags.get('shop', tags.get('building', 'Comercial'))
-            e_lat = element.get('lat') or element.get('center', {}).get('lat')
-            e_lon = element.get('lon') or element.get('center', {}).get('lon')
-            
-            telefone = tags.get('phone', tags.get('contact:phone', ''))
-            cnpj = tags.get('ref:cnpj', '')
+    
+    endpoints = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter"
+    ]
+    
+    for url in endpoints:
+        try:
+            response = requests.post(url, data={'data': overpass_query}, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                empresas = []
+                for element in data.get('elements', []):
+                    tags = element.get('tags', {})
+                    nome = tags.get('name', tags.get('operator', tags.get('brand', 'Empresa / Galpão Comercial')))
+                    tipo = tags.get('shop', tags.get('office', tags.get('building', tags.get('amenity', 'Comercial'))))
+                    
+                    e_lat = element.get('lat') or element.get('center', {}).get('lat')
+                    e_lon = element.get('lon') or element.get('center', {}).get('lon')
+                    
+                    telefone = tags.get('phone', tags.get('contact:phone', ''))
+                    cnpj = tags.get('ref:cnpj', '')
 
-            if e_lat and e_lon:
-                empresas.append({
-                    'nome': nome,
-                    'tipo': tipo.capitalize(),
-                    'lat': e_lat,
-                    'lon': e_lon,
-                    'rua': tags.get('addr:street', 'Endereço não especificado'),
-                    'numero': tags.get('addr:housenumber', 'S/N'),
-                    'telefone_osm': telefone,
-                    'cnpj_osm': cnpj
-                })
-        return pd.DataFrame(empresas)
-    except Exception:
-        return pd.DataFrame()
+                    if e_lat and e_lon:
+                        empresas.append({
+                            'nome': str(nome).strip(),
+                            'tipo': str(tipo).capitalize(),
+                            'lat': float(e_lat),
+                            'lon': float(e_lon),
+                            'rua': tags.get('addr:street', 'Endereço não especificado'),
+                            'numero': tags.get('addr:housenumber', 'S/N'),
+                            'telefone_osm': telefone,
+                            'cnpj_osm': cnpj
+                        })
+                
+                df = pd.DataFrame(empresas)
+                if not df.empty:
+                    df = df.drop_duplicates(subset=['nome', 'lat', 'lon'])
+                return df
+        except Exception:
+            continue
+            
+    return pd.DataFrame()
 
 @st.cache_data(show_spinner=False)
 def enriquecer_dados_receita(cnpj):
@@ -165,8 +180,8 @@ def processar_e_cruzar_dados(df_empresas, localidade):
 # ==========================================
 st.sidebar.header("🔍 KIVOO Prospecta")
 st.sidebar.markdown("---")
-cep_input = st.sidebar.text_input("Digite o CEP de referência:", value="39800-000")
-raio_km = st.sidebar.slider("Raio de prospecção (km):", min_value=1, max_value=20, value=3)
+cep_input = st.sidebar.text_input("Digite o CEP de referência:", value="35160-001")
+raio_km = st.sidebar.slider("Raio de prospecção (km):", min_value=1, max_value=20, value=5)
 btn_buscar = st.sidebar.button("⚡ Mapear Oportunidades", type="primary")
 
 # ==========================================
@@ -182,15 +197,14 @@ if 'busca_realizada' not in st.session_state:
     st.session_state.uf = ""
     st.session_state.logradouro = ""
     st.session_state.cep_buscado = ""
-    st.session_state.raio_buscado = 3
+    st.session_state.raio_buscado = 5
 
-# Quando o usuário clica no botão, salva os dados na sessão
 if btn_buscar:
-    with st.spinner("KIVOO Prospecta mapeando empresas, consultando Receita Federal e cruzando dados ANEEL..."):
+    with st.spinner("KIVOO Prospecta varrendo a região, consultando Receita e cruzando bases..."):
         dados_cep = buscar_cep(cep_input)
         
         if not dados_cep:
-            st.error("CEP não encontrado. Verifique o código digitado.")
+            st.error("CEP não encontrado. Verifique o número digitado.")
             st.session_state.busca_realizada = False
         else:
             logradouro = dados_cep.get('logradouro', '')
@@ -203,19 +217,23 @@ if btn_buscar:
 
             if lat_centro and lon_centro:
                 df_empresas = buscar_empresas_no_raio(lat_centro, lon_centro, raio_km)
-                df_alvos = processar_e_cruzar_dados(df_empresas, localidade)
                 
-                # Armazena na memória persistente
-                st.session_state.busca_realizada = True
-                st.session_state.df_empresas = df_empresas
-                st.session_state.df_alvos = df_alvos
-                st.session_state.lat_centro = lat_centro
-                st.session_state.lon_centro = lon_centro
-                st.session_state.localidade = localidade
-                st.session_state.uf = uf
-                st.session_state.logradouro = logradouro
-                st.session_state.cep_buscado = cep_input
-                st.session_state.raio_buscado = raio_km
+                if df_empresas.empty:
+                    st.warning("A busca no raio selecionado não retornou estabelecimentos cadastrados. Tente ajustar o CEP ou diminuir o raio para 5km a 10km.")
+                    st.session_state.busca_realizada = False
+                else:
+                    df_alvos = processar_e_cruzar_dados(df_empresas, localidade)
+                    
+                    st.session_state.busca_realizada = True
+                    st.session_state.df_empresas = df_empresas
+                    st.session_state.df_alvos = df_alvos
+                    st.session_state.lat_centro = lat_centro
+                    st.session_state.lon_centro = lon_centro
+                    st.session_state.localidade = localidade
+                    st.session_state.uf = uf
+                    st.session_state.logradouro = logradouro
+                    st.session_state.cep_buscado = cep_input
+                    st.session_state.raio_buscado = raio_km
             else:
                 st.error("Erro ao converter CEP em coordenadas geográficas.")
                 st.session_state.busca_realizada = False
@@ -246,7 +264,7 @@ if st.session_state.busca_realizada:
     
     with col_mapa:
         st.subheader("🗺️ Mapeamento de Campo (Pins Quentes)")
-        m = folium.Map(location=[lat_centro, lon_centro], zoom_start=14)
+        m = folium.Map(location=[lat_centro, lon_centro], zoom_start=13)
         
         folium.Marker(
             [lat_centro, lon_centro], 
@@ -280,7 +298,7 @@ if st.session_state.busca_realizada:
                 icon=folium.Icon(color="green", icon="briefcase", prefix="fa")
             ).add_to(m)
         
-        st_folium(m, width="100%", height=480, key="mapa_kivoo")
+        st_folium(m, width="100%", height=480, key="mapa_kivoo_v2")
     
     with col_tabela:
         st.subheader("📋 Relatório Comercial de Leads")
