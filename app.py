@@ -170,19 +170,32 @@ raio_km = st.sidebar.slider("Raio de prospecção (km):", min_value=1, max_value
 btn_buscar = st.sidebar.button("⚡ Mapear Oportunidades", type="primary")
 
 # ==========================================
-# PAINEL PRINCIPAL
+# INICIALIZAÇÃO DA MEMÓRIA DE SESSÃO
 # ==========================================
+if 'busca_realizada' not in st.session_state:
+    st.session_state.busca_realizada = False
+    st.session_state.df_empresas = None
+    st.session_state.df_alvos = None
+    st.session_state.lat_centro = None
+    st.session_state.lon_centro = None
+    st.session_state.localidade = ""
+    st.session_state.uf = ""
+    st.session_state.logradouro = ""
+    st.session_state.cep_buscado = ""
+    st.session_state.raio_buscado = 3
+
+# Quando o usuário clica no botão, salva os dados na sessão
 if btn_buscar:
     with st.spinner("KIVOO Prospecta mapeando empresas, consultando Receita Federal e cruzando dados ANEEL..."):
         dados_cep = buscar_cep(cep_input)
         
         if not dados_cep:
             st.error("CEP não encontrado. Verifique o código digitado.")
+            st.session_state.busca_realizada = False
         else:
             logradouro = dados_cep.get('logradouro', '')
             localidade = dados_cep.get('localidade', '')
             uf = dados_cep.get('uf', '')
-            st.success(f"📍 Região Alvo Mapeada: **{localidade} - {uf}** ({logradouro or 'Centro'})")
             
             lat_centro, lon_centro = geolocalizar_endereco(logradouro, localidade, uf)
             if not lat_centro:
@@ -192,72 +205,100 @@ if btn_buscar:
                 df_empresas = buscar_empresas_no_raio(lat_centro, lon_centro, raio_km)
                 df_alvos = processar_e_cruzar_dados(df_empresas, localidade)
                 
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Empresas Mapeadas", len(df_empresas))
-                col2.metric("Com Solar ANEEL (Descartadas)", len(df_empresas) - len(df_alvos))
-                col3.metric("🎯 Alvos Quentes (Sem Solar)", len(df_alvos))
-                
-                st.markdown("---")
-                
-                col_mapa, col_tabela = st.columns([3, 2])
-                
-                with col_mapa:
-                    st.subheader("🗺️ Mapeamento de Campo (Pins Quentes)")
-                    m = folium.Map(location=[lat_centro, lon_centro], zoom_start=14)
-                    
-                    folium.Marker(
-                        [lat_centro, lon_centro], 
-                        popup="Centro de Busca (CEP)", 
-                        icon=folium.Icon(color="red", icon="home")
-                    ).add_to(m)
-                    
-                    folium.Circle(
-                        radius=raio_km * 1000, 
-                        location=[lat_centro, lon_centro], 
-                        color="crimson", 
-                        fill=True, 
-                        fill_opacity=0.08
-                    ).add_to(m)
-                    
-                    for _, row in df_alvos.iterrows():
-                        popup_html = f"""
-                        <div style='font-family: sans-serif; width: 220px;'>
-                            <h4 style='margin-bottom:2px; color:#1E3A8A;'>{row['nome']}</h4>
-                            <b>Tipo:</b> {row['tipo']}<br>
-                            <b>Endereço:</b> {row['rua']}, {row['numero']}<br>
-                            <b>Telefone:</b> {row['telefone']}<br>
-                            <b>Sócio/Dono:</b> {row['socios_donos']}<br>
-                            <span style='color:green; font-weight:bold;'>✔ Sem Energia Solar ANEEL</span>
-                        </div>
-                        """
-                        folium.Marker(
-                            [row['lat'], row['lon']], 
-                            popup=folium.Popup(popup_html, max_width=260), 
-                            tooltip=row['nome'], 
-                            icon=folium.Icon(color="green", icon="briefcase", prefix="fa")
-                        ).add_to(m)
-                    
-                    st_folium(m, width="100%", height=480)
-                
-                with col_tabela:
-                    st.subheader("📋 Relatório Comercial de Leads")
-                    if not df_alvos.empty:
-                        st.dataframe(
-                            df_alvos[['nome', 'tipo', 'telefone', 'socios_donos', 'rua', 'numero']], 
-                            use_container_width=True, 
-                            height=380
-                        )
-                        
-                        csv = df_alvos.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            "📥 Baixar Lista Comercial (CSV)", 
-                            data=csv, 
-                            file_name=f"kivoo_prospecta_{cep_input}.csv", 
-                            mime="text/csv"
-                        )
-                    else:
-                        st.info("Nenhuma empresa sem energia solar encontrada no raio selecionado.")
+                # Armazena na memória persistente
+                st.session_state.busca_realizada = True
+                st.session_state.df_empresas = df_empresas
+                st.session_state.df_alvos = df_alvos
+                st.session_state.lat_centro = lat_centro
+                st.session_state.lon_centro = lon_centro
+                st.session_state.localidade = localidade
+                st.session_state.uf = uf
+                st.session_state.logradouro = logradouro
+                st.session_state.cep_buscado = cep_input
+                st.session_state.raio_buscado = raio_km
             else:
                 st.error("Erro ao converter CEP em coordenadas geográficas.")
+                st.session_state.busca_realizada = False
+
+# ==========================================
+# EXIBIÇÃO DOS RESULTADOS (PERSISTENTE)
+# ==========================================
+if st.session_state.busca_realizada:
+    localidade = st.session_state.localidade
+    uf = st.session_state.uf
+    logradouro = st.session_state.logradouro
+    lat_centro = st.session_state.lat_centro
+    lon_centro = st.session_state.lon_centro
+    df_empresas = st.session_state.df_empresas
+    df_alvos = st.session_state.df_alvos
+    raio_km_usado = st.session_state.raio_buscado
+
+    st.success(f"📍 Região Alvo Mapeada: **{localidade} - {uf}** ({logradouro or 'Centro'})")
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Empresas Mapeadas", len(df_empresas))
+    col2.metric("Com Solar ANEEL (Descartadas)", len(df_empresas) - len(df_alvos))
+    col3.metric("🎯 Alvos Quentes (Sem Solar)", len(df_alvos))
+    
+    st.markdown("---")
+    
+    col_mapa, col_tabela = st.columns([3, 2])
+    
+    with col_mapa:
+        st.subheader("🗺️ Mapeamento de Campo (Pins Quentes)")
+        m = folium.Map(location=[lat_centro, lon_centro], zoom_start=14)
+        
+        folium.Marker(
+            [lat_centro, lon_centro], 
+            popup="Centro de Busca (CEP)", 
+            icon=folium.Icon(color="red", icon="home")
+        ).add_to(m)
+        
+        folium.Circle(
+            radius=raio_km_usado * 1000, 
+            location=[lat_centro, lon_centro], 
+            color="crimson", 
+            fill=True, 
+            fill_opacity=0.08
+        ).add_to(m)
+        
+        for _, row in df_alvos.iterrows():
+            popup_html = f"""
+            <div style='font-family: sans-serif; width: 220px;'>
+                <h4 style='margin-bottom:2px; color:#1E3A8A;'>{row['nome']}</h4>
+                <b>Tipo:</b> {row['tipo']}<br>
+                <b>Endereço:</b> {row['rua']}, {row['numero']}<br>
+                <b>Telefone:</b> {row['telefone']}<br>
+                <b>Sócio/Dono:</b> {row['socios_donos']}<br>
+                <span style='color:green; font-weight:bold;'>✔ Sem Energia Solar ANEEL</span>
+            </div>
+            """
+            folium.Marker(
+                [row['lat'], row['lon']], 
+                popup=folium.Popup(popup_html, max_width=260), 
+                tooltip=row['nome'], 
+                icon=folium.Icon(color="green", icon="briefcase", prefix="fa")
+            ).add_to(m)
+        
+        st_folium(m, width="100%", height=480, key="mapa_kivoo")
+    
+    with col_tabela:
+        st.subheader("📋 Relatório Comercial de Leads")
+        if not df_alvos.empty:
+            st.dataframe(
+                df_alvos[['nome', 'tipo', 'telefone', 'socios_donos', 'rua', 'numero']], 
+                use_container_width=True, 
+                height=380
+            )
+            
+            csv = df_alvos.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "📥 Baixar Lista Comercial (CSV)", 
+                data=csv, 
+                file_name=f"kivoo_prospecta_{st.session_state.cep_buscado}.csv", 
+                mime="text/csv"
+            )
+        else:
+            st.info("Nenhuma empresa sem energia solar encontrada no raio selecionado.")
 else:
     st.info("👈 Digite o CEP e clique em **⚡ Mapear Oportunidades** para gerar a lista de leads.")
